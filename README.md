@@ -1,6 +1,6 @@
 ---
-title: Unclip Np Vr
-emoji: 📊
+title: Unclip with Negative Prompt and Variations
+emoji: 👽
 colorFrom: pink
 colorTo: blue
 sdk: gradio
