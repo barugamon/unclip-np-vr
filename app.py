@@ -19,11 +19,13 @@ feature_extractor = CLIPFeatureExtractor.from_pretrained("openai/clip-vit-large-
 img2img_generator = UnCLIPImageVariationPipeline.from_pretrained("kakaobrain/karlo-v1-alpha", image_encoder=image_encoder, feature_extractor=feature_extractor, torch_dtype=torch.float16)
 img2img_generator = img2img_generator.to(device)
 
+# txt2img_generator.enable_sequential_cpu_offload()
+# img2img_generator.enable_sequential_cpu_offload()
+
+
 import gradio as gr
 
-# history = []
-# history_index = 0
-
+@torch.no_grad()
 def do_generate_txt2img(prompt, negative_prompt="", num_images_per_prompt=4, prior_num_inference_steps=50, decoder_num_inference_steps=25, super_res_num_inference_steps=7, prior_guidance_scale=4.0, decoder_guidance_scale=4.0, manual_seed=-1, history=[], history_index=0):
     generator = None
     if manual_seed > -1:
@@ -42,9 +44,16 @@ def do_generate_txt2img(prompt, negative_prompt="", num_images_per_prompt=4, pri
 
     return new_images, new_history, new_history_index
 
-def do_generate_img2img(target_image, prompt="", negative_prompt="", num_images_per_prompt=4, decoder_num_inference_steps=25, decoder_guidance_scale=4.0, history=[], history_index=0):
+@torch.no_grad()
+def do_generate_img2img(target_image, prompt="", negative_prompt="", num_images_per_prompt=4, decoder_num_inference_steps=25, decoder_guidance_scale=4.0, manual_seed=-1, history=[], history_index=0):
+    generator = None
+    if manual_seed > -1:
+        generator = torch.Generator()
+        generator.manual_seed(int(manual_seed))
+    # resize
+    target_image = target_image.resize((256,256))
     # generate
-    new_images = img2img_generator(image=target_image, prompt=prompt, negative_prompt=negative_prompt, num_images_per_prompt=int(num_images_per_prompt), decoder_num_inference_steps=int(decoder_num_inference_steps), decoder_guidance_scale=float(decoder_guidance_scale), image_embeddings=None).images
+    new_images = img2img_generator(image=target_image, prompt=prompt, negative_prompt=negative_prompt, num_images_per_prompt=int(num_images_per_prompt), decoder_num_inference_steps=int(decoder_num_inference_steps), decoder_guidance_scale=float(decoder_guidance_scale), image_embeddings=None, generator=generator).images
 
     # update history
     new_history, new_history_index = do_get_appended_history(history, history_index, new_images)
@@ -78,8 +87,9 @@ def highlight_selected_image(selected_image_index):
     new_css = new_css.replace("TARGET_IMAGE_INDEX", str(selected_image_index))
     return gr.update(css=new_css)
 
-def do_upscale_image(target_image, resize_dims=(196,196), num_inference_steps=100):
-    upscaled_image = image_upscaler(image=target_image.resize(resize_dims), num_inference_steps=num_inference_steps).images
+@torch.no_grad()
+def do_upscale_image(target_image, downsample_size=128, num_inference_steps=100):
+    upscaled_image = image_upscaler(image=target_image.resize((downsample_size, downsample_size)), num_inference_steps=num_inference_steps).images
     torch.cuda.empty_cache()
     return upscaled_image[0]
 
@@ -125,13 +135,13 @@ with gr.Blocks(css="./style.css") as demo:
                 with gr.Column(scale=1):
                     txt2img_prompt = gr.Textbox(value="Beautiful painting of a ghastly skeleton king in armor emerging from a medieval crypt by Frank Frazetta. Foreboding mood. uhd, high resolution, fine details, intricate details, centered, high quality, fine details, masterpiece, fine brushstrokes, dynamic movement", interactive=True, label="Prompt")
                     txt2img_negative_prompt = gr.Textbox(value="low quality, mid quality, low resolution, jpeg artifacts, watermark, text, poorly drawn, amateur", interactive=True, label="Negative Prompt")
-                    txt2img_decoder_guidance_scale = gr.Slider(1,10,step=0.5, value=5.0, interactive=True, label="Guidance Scale For Image Generation")
+                    txt2img_decoder_guidance_scale = gr.Slider(1,10,step=0.5, value=8.0, interactive=True, label="Guidance Scale For Image Generation")
                     with gr.Accordion('More Options', open=False):
                         txt2img_num_images_per_prompt = gr.Slider(1,8,step=1,value=2, label="Number of Images", visible=True, interactive=True)
-                        txt2img_prior_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Prior Inference Steps", visible=True, interactive=False)
-                        txt2img_decoder_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Decoder Inference Steps", visible=True, interactive=False)
-                        txt2img_super_res_num_inference_steps = gr.Slider(1,20,step=1,value=7, label="Superres Inference Steps", visible=True, interactive=False)
-                        txt2img_prior_guidance_scale = gr.Slider(1,10,step=0.5, value=4.0, label="Prior Guidance Scale", visible=True, interactive=False)
+                        txt2img_prior_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Prior Inference Steps", visible=True, interactive=True)
+                        txt2img_decoder_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Decoder Inference Steps", visible=True, interactive=True)
+                        txt2img_super_res_num_inference_steps = gr.Slider(1,20,step=1,value=7, label="Superres Inference Steps", visible=True, interactive=True)
+                        txt2img_prior_guidance_scale = gr.Slider(1,10,step=0.5, value=4.0, label="Prior Guidance Scale", visible=True, interactive=True)
                         txt2img_manual_seed = gr.Number(value=-1, interactive=True, label="Seed")
                     with gr.Row():
                         txt2img_button = gr.Button(value="Generate Images from Text", variant="primary")
@@ -149,13 +159,13 @@ with gr.Blocks(css="./style.css") as demo:
             with gr.Row():
                 with gr.Column(scale=1):
                     img2img_target_image = gr.Image(type="pil")
-                    img2img_prompt = gr.Textbox(value="Beautiful painting of a ghastly skeleton king in armor emerging from a medieval crypt by Frank Frazetta. Foreboding mood. uhd, high resolution, fine details, intricate details, centered, high quality, fine details, masterpiece, fine brushstrokes, dynamic movement", interactive=True, label="Prompt")
-                    img2img_negative_prompt = gr.Textbox(value="low quality, mid quality, low resolution, jpeg artifacts, watermark, text, poorly drawn, amateur", interactive=True, label="Negative Prompt")
-                    img2img_decoder_guidance_scale = gr.Slider(1,10,step=0.5, value=5.0, interactive=True, label="Guidance Scale For Image Generation")
+                    img2img_prompt = gr.Textbox(value="", interactive=True, label="Prompt")
+                    img2img_negative_prompt = gr.Textbox(value="", interactive=True, label="Negative Prompt")
+                    img2img_decoder_guidance_scale = gr.Slider(1,10,step=0.5, value=8.0, interactive=True, label="Guidance Scale For Image Generation")
                     with gr.Accordion('More Options', open=False):
                         img2img_num_images_per_prompt = gr.Slider(1,8,step=1,value=2, label="Number of Images", visible=True, interactive=False)
                         img2img_prior_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Prior Inference Steps", visible=True, interactive=False)
-                        img2img_decoder_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Decoder Inference Steps", visible=True, interactive=False)
+                        img2img_decoder_num_inference_steps = gr.Slider(10,100,step=5,value=25, label="Decoder Inference Steps", visible=True, interactive=True)
                         img2img_super_res_num_inference_steps = gr.Slider(1,20,step=1,value=7, label="Superres Inference Steps", visible=True, interactive=False)
                         img2img_prior_guidance_scale = gr.Slider(1,10,step=0.5, value=4.0, label="Prior Guidance Scale", visible=True, interactive=False)
                         img2img_manual_seed = gr.Number(value=-1, interactive=True, label="Seed")
@@ -177,6 +187,8 @@ with gr.Blocks(css="./style.css") as demo:
             with gr.Row():
                 with gr.Column(scale=1):
                     upscale_target_image = gr.Image(type="pil")
+                    upscale_downsample_size = gr.Slider(value=256, minimum=64, maximum=256, step=32, interactive=True)
+                    upscale_num_inference_steps = gr.Slider(value=100, minimum=5, maximum=100, step=5, interactive=True)
                     upscale_button = gr.Button(value="Upscale", variant="primary")
                 with gr.Column(scale=1):
                     upscaled_image = gr.Image(type="pil", elem_id="upscaled-image").style(width=768, height=768)
@@ -203,64 +215,21 @@ with gr.Blocks(css="./style.css") as demo:
         img2img_back_in_history_button.click(do_step_back_in_history, inputs=[img2img_history, img2img_history_index], outputs=[img2img_gallery, img2img_history, img2img_history_index], queue=False)
         img2img_forward_in_history_button.click(do_step_forward_in_history, inputs=[img2img_history, img2img_history_index], outputs=[img2img_gallery, img2img_history, img2img_history_index], queue=False)
         # img2img generation
-        img2img_button.click(do_generate_img2img, inputs=[img2img_target_image, img2img_prompt, img2img_negative_prompt, img2img_num_images_per_prompt,img2img_decoder_num_inference_steps, img2img_decoder_guidance_scale, img2img_history, img2img_history_index], outputs=[img2img_gallery, img2img_history, img2img_history_index])
+        img2img_button.click(do_generate_img2img, inputs=[img2img_target_image, img2img_prompt, img2img_negative_prompt, img2img_num_images_per_prompt,img2img_decoder_num_inference_steps, img2img_decoder_guidance_scale, img2img_manual_seed, img2img_history, img2img_history_index], outputs=[img2img_gallery, img2img_history, img2img_history_index])
         # img2img send buttons
         img2img_send_to_img2img_button.click(do_send_image_from_history, inputs=[img2img_history, img2img_history_index, img2img_selected_image_index, img2img_tab_id], outputs=[img2img_target_image, tabs])
         img2img_send_to_upscale_button.click(do_send_image_from_history, inputs=[img2img_history, img2img_history_index, img2img_selected_image_index, upscale_tab_id], outputs=[upscale_target_image, tabs])
         
         # upscale
-        upscale_button.click(do_upscale_image, inputs=[upscale_target_image], outputs=[upscaled_image])
+        upscale_button.click(do_upscale_image, inputs=[upscale_target_image, upscale_downsample_size, upscale_num_inference_steps], outputs=[upscaled_image])
         upscale_save_button.click(do_save_image, inputs=[upscaled_image], outputs=[])
         
         # tabs
         txt2img_tab.select(do_update_selected_tab_index, inputs=[txt2img_tab_id], outputs=[tabs])
         img2img_tab.select(do_update_selected_tab_index, inputs=[img2img_tab_id], outputs=[tabs])
         upscale_tab.select(do_update_selected_tab_index, inputs=[upscale_tab_id], outputs=[tabs])
-
-
-
-
-        # img2img_button.click(do_generate_img2img, inputs=[img2img_target_image, img2img_prompt, img2img_negative_prompt, img2img_num_images_per_prompt, img2img_prior_num_inference_steps,img2img_decoder_num_inference_steps, img2img_super_res_num_inference_steps, img2img_prior_guidance_scale, img2img_decoder_guidance_scale, img2img_manual_seed, img2img_history, img2img_history_index], outputs=[img2img_gallery, img2img_history, img2img_history_index])
-        # with gr.Column(scale=1):
-        #     with gr.Tabs() as tabs:
-        #         with gr.TabItem("Generated", id=0):
-                    
-        #             with gr.Row():
-        #                 back_in_history_button = gr.Button(value="Back in History", variant="secondary")
-        #                 back_in_history_button.click(do_step_back_in_history, inputs=[history, history_index], outputs=[gallery, history, history_index], queue=False)
-
-        #                 forward_in_history_button = gr.Button(value="Forward in Image History", variant="secondary")
-        #                 forward_in_history_button.click(do_step_forward_in_history, inputs=[history, history_index], outputs=[gallery, history, history_index], queue=False)
-
-        #                 # gallery.change(fn=lambda value: gr.update(value=value), inputs=history_index, outputs=test)
-        #             with gr.Row():
-        #                 generate_button = gr.Button(value="Generate New Images", variant="primary")
-
-        #             with gr.Row():
-        #                 selected_image_index = gr.Radio([1,2], value=1, interactive=True, label="Selected Image for Variations")
-        #                 decoder_guidance_scale_vg = gr.Slider(1,10,step=0.5, value=5.5, interactive=True, label="Guidance Scale For Variation Generation")
-
-        #             # selected_image_index.change(highlight_selected_image, inputs=[demo, selected_image_index], outputs=[])
-        #             with gr.Row():
-        #                 upscale_button = gr.Button(value="Upscale Selected Image", variant="secondary")
-        #                 variations_button = gr.Button(value=f"Generate Variations from Selected Image", variant="primary")
-
-        #             variations_button.click(generate_variations, inputs=[gallery, prompt, negative_prompt, selected_image_index, num_images_per_prompt, decoder_num_inference_steps, decoder_guidance_scale_vg, history, history_index], outputs=[gallery, history, history_index])
-
-        #             generate_button.click(generate_images, inputs=[prompt, negative_prompt, num_images_per_prompt, prior_num_inference_steps, decoder_num_inference_steps, super_res_num_inference_steps, prior_guidance_scale, decoder_guidance_scale_ig, manual_seed, history, history_index], outputs=[gallery, history, history_index])
-        #         with gr.TabItem('Upscaled', id=1) as upscale_tab:
-        #             with gr.Row():
-        #                 upscaled_image = gr.Image(type="pil", shape=(768,None))
-
-        #             with gr.Row():
-        #                 save_path = gr.Textbox(value="./outputs/upscaled", interactive=True, label="Save Path", visible=False)
-        #                 save_upscaled_image_button = gr.Button(value="Save Upscaled Image", variant="primary")
-
-        #             save_upscaled_image_button.click(save_upscaled_image, inputs=[upscaled_image, save_path], outputs=[])
-        #             upscale_button.click(upscale_selected_image, inputs=[gallery, selected_image_index], outputs=[upscaled_image, tabs])
-
             
 # demo.queue(concurrency_count=2)
 # demo.launch(share=True)
 
-demo.launch()
+demo.launch(share=False)
